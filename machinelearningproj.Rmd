@@ -1,0 +1,139 @@
+---
+title: "The Manner of Activity Prediction"
+output: html_document
+keep_md: yes
+fig_caption: yes
+---
+
+##Synopsis
+Using devices such as Jawbone Up, Nike FuelBand and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement, a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. The goal of this project will be to use data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants and predict the manner in which they did the exercise. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways: Exactly according to the specification (Class A), Throwing the elbows to the front (Class B), Lifting the dumbbell only halfway (Class C), Lowering the dumbbell only halfway (Class D), Throwing the hips to the front (Class E).
+
+##Data Processing
+Set the seed for optim reproducibility and read the data. Resolving, in the same time, the issues with mising or deformed entries.
+```{r, echo=TRUE}
+seed <- as.numeric(as.Date("11-11-2015"))
+set.seed(seed)
+data_training <- read.csv('http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', na.strings=c("NA","#DIV/0!",""))
+#View(data_training)
+```
+Data exploration:
+```{r, echo = TRUE}
+table(data_training$classe)
+prop.table(table(data_training$user_name, data_training$classe), 1)
+prop.table(table(data_training$classe))
+```
+The description of the project states that "your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants", that implies that I can delete first 7 columns.
+My understanding is that the columns before roll_ belt such as cvtd_timestamp were used by the initial researchers to keep track of how the data were collected. They have NOTHING to do with the task at hand, which is to predict which of the five categories of classe the row falls into based on the SENSOR data. 
+Explore and preprocess the data:
+```{r, echo = TRUE}
+library(caret)
+data_training <- data_training[, -(1:7)]
+#we can see many columns with Na's 
+sum(is.na(data_training))
+#there are way to many NA's. I will create a function which will show
+#which variables are containing them
+#you can use: lapply(data_training, function(x) sum(is.na(x))) or
+show <- colSums(is.na(data_training))
+#we can see that where we have NA's, those columns are almost totaly full of them, so we are safe if I remove those columns
+#now I will keep just those variables with data
+data_training <- data_training[, show == 0]
+
+#find and remove corelated variables/centering and scaling the data
+findCorrelation(cor(data_training[,-53]), cutoff = .9, names = T)
+data_training <- data_training[, -c(10, 1, 9, 8, 31, 33, 18)]
+
+#looking for near zero variables
+nzv <- nearZeroVar(data_training, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else message("No variables with near zero variance")
+#dim(data_training)
+#[1] 19622    46
+```
+
+We split the training set into 2 sets, for cross validation purposes. We randomly subsample 70% of the set for training purposes (actual model building), while the 30% remainder will be used only for testing and OOS error estimation.
+```{r, echo = FALSE}
+# create training set indexes with 70% of data
+inTrain <- createDataPartition(y=data_training$classe,p=0.70, list=FALSE)
+# subset data to training
+training <- data_training[inTrain,]
+# subset data (the rest) to test
+validation <- data_training[-inTrain,]
+#or for previous 3 statements you can use the idea from ISLR book, page 325
+# dimension of original and training dataset
+# rbind("original dataset" = dim(data_training),"training set" = dim(training))
+#                   [,1] [,2]
+# original dataset 19622   46
+# training set     13737   46
+```
+
+Train the training set and predict on validation set by using 
+different machine learning models.  Let's look at their relative importance using the output of a quick afferent algorithm. For example: we call directly using randomForest() rather than the caret package, purely for speed purposes.
+```{r, echo=TRUE}
+#predicting with decision trees
+library(rpart)
+library(tree)
+#tree <- rpart(classe ~ ., data=training, method="class") why this doen't work with cv.tree function?
+rtree <- tree(classe ~ ., data=training, method="class")
+rtree_valid <- predict(rtree, validation, type = 'class')
+first <- confusionMatrix(rtree_valid, validation$classe)
+overall <- first$overall
+overall['Accuracy'] 
+#this tree at full depth might be too variable. I use cross-validation
+#to prune it.
+cv_tree <- cv.tree(rtree, FUN = prune.misclass)
+plot(cv_tree)
+#we can see the optimum choice is the one with 23 terminal nodes
+prune_tree <- prune.misclass(rtree, best = 19)
+plot(prune_tree)
+text(prune_tree, pretty = 2)
+prune_tree_valid <- predict(prune_tree, validation, type = 'class')
+first_one <- confusionMatrix(prune_tree_valid, validation$classe)
+overall <- first_one$overall
+overall['Accuracy'] 
+
+#so we didn't get any improvement in accuracy but we found a easier tree to interpret
+
+#predicting using random forests
+#In Random Forest model there is no need to perform cross-validation externally, it's performed automatically by the algorithm. 
+#  Breiman, the developer of the Random Forest algorithm approached the subject as follows:
+# The out-of-bag (oob) error estimate
+# "In random forests, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error. It is estimated internally, during the run."
+library(randomForest)
+rf <- randomForest(classe~. , data=training,importance=TRUE)
+rf_valid <- predict(rf,validation)
+# Confusion matrix for validation step
+second <- confusionMatrix(rf_valid, validation$classe)
+overall <- second$overall
+overall['Accuracy'] 
+
+#predicting with boosting, the cross-validation perform is bootstrap by default
+boost <- train(classe ~ ., method="gbm",data=training,verbose=FALSE)
+boost_valid <- predict(boost, validation)
+third <- confusionMatrix(boost_valid, validation$classe)
+overall <- third$overall
+overall['Accuracy'] 
+```
+We can clearly see that the Random Forest model has the best prediction with an out-of-sample error rate estimation of just 0.0048. Where OOS error equals to 1 - accuracy.
+In conclusion, I approached the models intended (teached by the end of week 3) to use for this project.
+
+A list of first 20 variables which participates in the model, considering the importance is revealed below:
+```{r, echo = TRUE}
+varImpPlot(rf)
+```
+
+One could go further with this and select just those variables with real importance to ensure that the model is even more interpretable and to increase speed and accuracy. But with a model this accurate, I will pass this time.
+
+##Testing the Model 
+We need to perform the same pre-process work as we did on training data set:
+```{r, echo=TRUE}
+data_test <- read.csv('http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+idem <- names(data_test) %in% names(data_training)
+test <- data_test[idem]
+dim(test)
+#[1] 20 45. It has the same dimmension as training data minus the outcome
+test_test <- predict(rf, test)
+#the thest results
+test_test
+```
+
+
+
